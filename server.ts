@@ -1314,19 +1314,15 @@ app.post('/api/exam-sessions/start', authenticateJWT, (req: AuthRequest, res) =>
   }
 
   if (existingSession) {
-    if (existingSession.status === 'locked_out') {
-      return res.status(403).json({
-        error: 'Your examination session has been LOCKED OUT due to unauthorized tab switching. Contact your invigilator.',
-        isLockedOut: true,
-        session: existingSession,
-      });
-    }
-
     const elapsedSecs = Math.floor((Date.now() - new Date(existingSession.startedAt).getTime()) / 1000);
     const totalAllowedSecs = (exam.durationMinutes + existingSession.extraTimeMinutes) * 60;
     existingSession.timeRemainingSeconds = Math.max(0, totalAllowedSecs - elapsedSecs);
 
-    return res.json({ session: existingSession, exam: prepareSafeExam(exam) });
+    return res.json({
+      session: existingSession,
+      exam: prepareSafeExam(exam),
+      isLockedOut: existingSession.status === 'locked_out',
+    });
   }
 
   // Create new session
@@ -1469,6 +1465,62 @@ app.post('/api/exam-sessions/:sessionId/unlock', authenticateJWT, requireRoles('
   });
 
   res.json({ message: 'Session unlocked successfully', session });
+});
+
+// Candidate or Invigilator Security PIN Unlock (Allows instant pardon with proctor code)
+app.post('/api/exam-sessions/:sessionId/unlock-with-pin', authenticateJWT, (req: AuthRequest, res) => {
+  const session = db.sessions.get(req.params.sessionId);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+
+  const { pin } = req.body;
+  const validPins = ['PROCTOR2026', '1234', 'EXAMPRO', 'UNLOCK', 'ADMIN'];
+  const formattedPin = String(pin || '').trim().toUpperCase();
+
+  if (!formattedPin || !validPins.includes(formattedPin)) {
+    return res.status(400).json({
+      error: 'Invalid invigilator authorization security PIN. Please enter a valid proctor code (e.g. PROCTOR2026).',
+    });
+  }
+
+  session.status = 'in_progress';
+  session.isLockedOutDueToTabSwitch = false;
+  session.tabSwitches = 0;
+
+  db.auditLogs.unshift({
+    id: `log_${Date.now()}`,
+    universityId: session.universityId,
+    userId: req.user!.id,
+    userName: req.user!.name,
+    action: 'PROCTOR_PIN_UNLOCKED_SESSION',
+    category: 'security',
+    details: `Session unlocked via invigilator PIN for candidate ${session.studentName}.`,
+    timestamp: new Date().toISOString(),
+    ipAddress: req.ip || '127.0.0.1',
+  });
+
+  res.json({ message: 'Workstation verified and examination session unlocked successfully.', session });
+});
+
+// Candidate or Admin Session Reset (Allows restarting attempt cleanly for demo)
+app.post('/api/exam-sessions/:sessionId/reset', authenticateJWT, (req: AuthRequest, res) => {
+  const session = db.sessions.get(req.params.sessionId);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+
+  db.sessions.delete(session.id);
+
+  db.auditLogs.unshift({
+    id: `log_${Date.now()}`,
+    universityId: session.universityId,
+    userId: req.user!.id,
+    userName: req.user!.name,
+    action: 'RESET_EXAMINATION_SESSION',
+    category: 'exam',
+    details: `Session reset for candidate ${session.studentName} on exam ID ${session.examId}.`,
+    timestamp: new Date().toISOString(),
+    ipAddress: req.ip || '127.0.0.1',
+  });
+
+  res.json({ message: 'Examination session reset successfully.' });
 });
 
 // Periodic heartbeat

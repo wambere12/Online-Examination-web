@@ -248,6 +248,25 @@ export const api = {
     );
   },
 
+  async unlockSessionWithPin(sessionId: string, pin: string) {
+    return request<{ message: string; session: ExamSession }>(
+      `/api/exam-sessions/${sessionId}/unlock-with-pin`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ pin }),
+      }
+    );
+  },
+
+  async resetExamSession(sessionId: string) {
+    return request<{ message: string }>(
+      `/api/exam-sessions/${sessionId}/reset`,
+      {
+        method: 'POST',
+      }
+    );
+  },
+
   async submitExamSession(sessionId: string) {
     return request<{
       message: string;

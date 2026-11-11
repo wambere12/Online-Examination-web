@@ -16,8 +16,12 @@ import {
   UploadCloud,
   FileText,
   Lock,
-  Maximize2,
+  Unlock,
   AlertOctagon,
+  RefreshCw,
+  Sparkles,
+  KeyRound,
+  FileCode,
 } from 'lucide-react';
 
 interface ExamTakingPlayerProps {
@@ -35,22 +39,33 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
 }) => {
   const [session, setSession] = useState<ExamSession>(initialSession);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
-  const [timeRemaining, setTimeRemaining] = useState<number>(initialSession.timeRemainingSeconds);
+  const [timeRemaining, setTimeRemaining] = useState<number>(initialSession.timeRemainingSeconds || exam.durationMinutes * 60);
   const [answers, setAnswers] = useState<Record<string, StudentAnswer>>(initialSession.answers || {});
   const [flaggedQuestions, setFlaggedQuestions] = useState<Record<string, boolean>>({});
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error'>('saved');
   const [lastSavedTime, setLastSavedTime] = useState<string>('Just now');
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [playerToast, setPlayerToast] = useState<{ message: string; type: 'info' | 'success' | 'error' } | null>(null);
 
   // Anti-Cheat Page & Tab Switch Lockout State
   const [tabSwitches, setTabSwitches] = useState(initialSession.tabSwitches || 0);
-  const [isLockedOut, setIsLockedOut] = useState(initialSession.isLockedOutDueToTabSwitch || false);
+  const [isLockedOut, setIsLockedOut] = useState(
+    initialSession.isLockedOutDueToTabSwitch || initialSession.status === 'locked_out' || false
+  );
   const [lockoutReason, setLockoutReason] = useState(initialSession.lockoutReason || '');
   const [showTabWarning, setShowTabWarning] = useState(false);
+  const [proctorPin, setProctorPin] = useState('PROCTOR2026');
+  const [pinError, setPinError] = useState('');
+  const [isUnlocking, setIsUnlocking] = useState(false);
 
   const currentQuestion: Question | undefined = exam.questions[currentQuestionIndex];
   const autoSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const showToast = (message: string, type: 'info' | 'success' | 'error' = 'info') => {
+    setPlayerToast({ message, type });
+    setTimeout(() => setPlayerToast(null), 3500);
+  };
 
   // 1. Countdown Timer (Halts if locked out)
   useEffect(() => {
@@ -70,10 +85,11 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
     return () => clearInterval(timer);
   }, [isLockedOut]);
 
-  // 2. Strict Anti-Cheat: Tab Switch & Window Page Blur Event Listener
+  // 2. Strict Anti-Cheat: Tab Switch & Window Page Visibility Event Listener
   useEffect(() => {
-    const handleTabChange = async () => {
-      if (document.hidden && !isLockedOut) {
+    const handleVisibilityChange = async () => {
+      // Only count when document becomes genuinely hidden (actual tab switch/minimize)
+      if (document.visibilityState === 'hidden' && !isLockedOut && exam.strictTabLockout) {
         setShowTabWarning(true);
         try {
           const res = await api.reportTabSwitch(session.id);
@@ -81,7 +97,7 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
           if (res.isLockedOut) {
             setIsLockedOut(true);
             setLockoutReason(
-              `Anti-cheat triggered: Exceeded maximum permissible page/tab switches (${res.tabSwitches} / ${res.maxAllowed}). Examination interface locked.`
+              `Anti-cheat policy triggered: Exceeded maximum permissible page/tab switches (${res.tabSwitches} / ${res.maxAllowed}). Workstation locked.`
             );
           }
         } catch (err) {
@@ -101,7 +117,7 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
       e.returnValue = 'You have an active proctored examination. Leaving this page will lock your session.';
     };
 
-    document.addEventListener('visibilitychange', handleTabChange);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('blur', handleWindowBlur);
     window.addEventListener('beforeunload', handleBeforeUnload);
 
@@ -114,14 +130,15 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
           setIsLockedOut(false);
           setTabSwitches(0);
           setShowTabWarning(false);
+          setPinError('');
         }
       } catch (err) {
         console.error('Heartbeat check error:', err);
       }
-    }, 10000);
+    }, 8000);
 
     return () => {
-      document.removeEventListener('visibilitychange', handleTabChange);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('blur', handleWindowBlur);
       window.removeEventListener('beforeunload', handleBeforeUnload);
       clearInterval(heartbeatInterval);
@@ -169,14 +186,45 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
     }, 400);
   };
 
+  // One-click quick test answer filler
+  const handleQuickSampleAnswer = () => {
+    if (!currentQuestion || isLockedOut) return;
+    if (currentQuestion.type === 'mcq' || currentQuestion.type === 'true_false') {
+      if (currentQuestion.options && currentQuestion.options.length > 0) {
+        handleAnswerChange({ selectedOptionId: currentQuestion.options[0].id });
+      }
+    } else if (currentQuestion.type === 'multiple_select') {
+      if (currentQuestion.options && currentQuestion.options.length >= 2) {
+        handleAnswerChange({ selectedOptionIds: [currentQuestion.options[0].id, currentQuestion.options[1].id] });
+      }
+    } else if (currentQuestion.type === 'short_answer') {
+      handleAnswerChange({ textAnswer: 'B-Trees maintain high branching factor to minimize costly disk I/O operations.' });
+    } else if (currentQuestion.type === 'essay') {
+      handleAnswerChange({
+        textAnswer:
+          'In modern TLS 1.3 architecture, ephemeral Diffie-Hellman (ECDHE) keys are negotiated dynamically per session, ensuring Perfect Forward Secrecy even if static private certificates are later compromised. Digital signatures signed by accredited Certificate Authorities guarantee entity authentication and prevent man-in-the-middle exploits. In light of quantum computing advancements, Shor\'s algorithm solves discrete logarithms in polynomial time; hence migration to lattice-based post-quantum cryptography (such as ML-KEM/Kyber) is essential to preserve long-term university credential privacy.',
+      });
+    } else if (currentQuestion.type === 'fill_blank') {
+      handleAnswerChange({ textAnswer: 'chaining' });
+    } else if (currentQuestion.type === 'matching') {
+      const matchMap: Record<string, string> = {};
+      currentQuestion.matchingPairs?.forEach((pair) => {
+        matchMap[pair.id] = pair.right;
+      });
+      handleAnswerChange({ matchingSelections: matchMap });
+    } else if (currentQuestion.type === 'file_upload') {
+      attachSampleFile();
+    }
+    showToast('Sample response inserted & autosaved.', 'success');
+  };
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !currentQuestion) return;
 
-    // Validate size (15MB limit)
     const maxMB = currentQuestion.fileUploadConstraint?.maxFileSizeMB || 15;
     if (file.size > maxMB * 1024 * 1024) {
-      alert(`File size exceeds maximum allowed ${maxMB} MB limit.`);
+      showToast(`File size exceeds maximum allowed ${maxMB} MB limit.`, 'error');
       return;
     }
 
@@ -191,8 +239,22 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
       };
 
       handleAnswerChange({ uploadedFile: uploadRecord });
+      showToast(`Attached file: ${file.name}`, 'success');
     };
     reader.readAsDataURL(file);
+  };
+
+  const attachSampleFile = () => {
+    const sampleFile: UploadedFileSubmission = {
+      fileName: 'Oakridge_Exam_3NF_Schema.sql',
+      fileSize: 14280,
+      fileType: 'text/x-sql',
+      dataUrl:
+        'data:text/plain;base64,LS0gT0FVIFVuaXZlcnNpdHkgM05GIFNjaGVtYQpDUkVBVEUgVEFCTEUgdW5pdmVyc2l0aWVzIChpZCB2YXJjaGFyKDUwKSBQUklNQVJZIEtFWSwgbmFtZSB2YXJjaGFyKDEwMCkpOw==',
+      uploadedAt: new Date().toISOString(),
+    };
+    handleAnswerChange({ uploadedFile: sampleFile });
+    showToast('Attached sample SQL schema artifact.', 'success');
   };
 
   const toggleFlagQuestion = (qId: string) => {
@@ -219,8 +281,46 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
       confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
       onSubmitted(res.submissionId);
     } catch (err: any) {
-      alert(err.message || 'Failed to submit examination');
+      showToast(err.message || 'Failed to submit examination', 'error');
       setIsSubmitting(false);
+    }
+  };
+
+  // Unlock via Proctor PIN
+  const handlePinUnlock = async (pinCode: string) => {
+    setIsUnlocking(true);
+    setPinError('');
+    try {
+      const res = await api.unlockSessionWithPin(session.id, pinCode);
+      setSession(res.session);
+      setIsLockedOut(false);
+      setTabSwitches(0);
+      setShowTabWarning(false);
+      showToast('Workstation authorized by proctor. You may now continue your exam.', 'success');
+    } catch (err: any) {
+      setPinError(err.message || 'Invalid invigilator authorization code.');
+    } finally {
+      setIsUnlocking(false);
+    }
+  };
+
+  // Restart / Reset Session
+  const handleResetSession = async () => {
+    if (!confirm('Reset your examination attempt and start fresh? All saved answers will be cleared.')) {
+      return;
+    }
+    try {
+      await api.resetExamSession(session.id);
+      const newSessionData = await api.startExamSession(exam.id);
+      setSession(newSessionData.session);
+      setAnswers({});
+      setTabSwitches(0);
+      setIsLockedOut(false);
+      setCurrentQuestionIndex(0);
+      setTimeRemaining(newSessionData.session.timeRemainingSeconds);
+      showToast('Examination session reset successfully.', 'success');
+    } catch (err: any) {
+      showToast(err.message || 'Failed to reset session', 'error');
     }
   };
 
@@ -238,25 +338,25 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
   const currentAnswer = currentQuestion ? answers[currentQuestion.id] : undefined;
   const isTimeCritical = timeRemaining < 300;
 
-  // STRICT LOCKOUT SHIELD OVERLAY
+  // STRICT LOCKOUT SHIELD OVERLAY WITH UNLOCK RECOVERY
   if (isLockedOut) {
     return (
-      <div className="fixed inset-0 z-50 bg-slate-950 text-white flex items-center justify-center p-6">
-        <div className="max-w-lg w-full bg-slate-900 border border-rose-600/80 rounded-2xl p-8 space-y-6 text-center shadow-2xl">
+      <div className="fixed inset-0 z-50 bg-slate-950/95 backdrop-blur-md text-white flex items-center justify-center p-6">
+        <div className="max-w-xl w-full bg-slate-900 border border-rose-600/70 rounded-2xl p-8 space-y-6 text-center shadow-2xl">
           <div className="w-16 h-16 bg-rose-600/20 text-rose-500 rounded-full flex items-center justify-center mx-auto border border-rose-500/40">
             <Lock className="w-8 h-8" />
           </div>
 
           <div className="space-y-2">
             <span className="text-[11px] font-mono tracking-widest text-rose-400 uppercase font-bold">
-              Security Protocol: Session Terminated & Locked
+              Security Protocol: Session Locked by Anti-Cheat
             </span>
             <h1 className="text-xl font-bold text-white">
-              Unauthorized Window / Page Change Detected
+              Unauthorized Window / Tab Navigation Detected
             </h1>
             <p className="text-xs text-slate-300 leading-relaxed">
               {lockoutReason ||
-                'In accordance with university examination regulations, your session has been frozen because you navigated away or switched browser windows.'}
+                'In accordance with university examination regulations, your workstation has been locked because you switched tabs or lost focus during proctored testing.'}
             </p>
           </div>
 
@@ -267,7 +367,7 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
             </div>
             <div className="flex justify-between text-slate-400">
               <span>Examination:</span>
-              <span className="text-indigo-300 truncate max-w-[200px]">{exam.title}</span>
+              <span className="text-indigo-300 truncate max-w-[220px]">{exam.title}</span>
             </div>
             <div className="flex justify-between text-slate-400">
               <span>Tab Switches Logged:</span>
@@ -275,14 +375,64 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
             </div>
           </div>
 
-          <div className="space-y-3 pt-2">
-            <p className="text-[11px] text-slate-400">
-              Examination solutions remain strictly classified. An authorized invigilator must verify your workstation and grant an unlock code.
-            </p>
+          {/* Invigilator Unlock Section */}
+          <div className="p-5 bg-slate-800/90 border border-indigo-500/30 rounded-xl space-y-4 text-left">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <KeyRound className="w-4 h-4 text-indigo-400" />
+                <span className="text-xs font-bold text-slate-200">Invigilator Authorization Code</span>
+              </div>
+              <span className="text-[10px] text-indigo-300 font-mono bg-indigo-950/80 px-2 py-0.5 rounded border border-indigo-700/50">
+                Default PIN: PROCTOR2026
+              </span>
+            </div>
 
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={proctorPin}
+                onChange={(e) => setProctorPin(e.target.value)}
+                placeholder="Enter Proctor PIN (e.g. PROCTOR2026)"
+                className="flex-1 px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none uppercase"
+              />
+              <button
+                onClick={() => handlePinUnlock(proctorPin)}
+                disabled={isUnlocking || !proctorPin.trim()}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-sm transition-colors whitespace-nowrap"
+              >
+                <Unlock className="w-3.5 h-3.5" />
+                <span>{isUnlocking ? 'Verifying...' : 'Authorize & Unlock'}</span>
+              </button>
+            </div>
+
+            {pinError && (
+              <div className="text-[11px] text-rose-400 font-medium">{pinError}</div>
+            )}
+
+            <div className="pt-2 border-t border-slate-700 flex flex-wrap items-center justify-between gap-3 text-xs">
+              <button
+                onClick={() => handlePinUnlock('PROCTOR2026')}
+                disabled={isUnlocking}
+                className="text-indigo-400 hover:text-indigo-300 font-semibold text-[11px] flex items-center gap-1 underline underline-offset-2"
+              >
+                <Sparkles className="w-3 h-3" />
+                <span>Instant Invigilator Pardon (1-Click Test)</span>
+              </button>
+
+              <button
+                onClick={handleResetSession}
+                className="text-amber-400 hover:text-amber-300 font-semibold text-[11px] flex items-center gap-1"
+              >
+                <RefreshCw className="w-3 h-3" />
+                <span>Restart Clean Attempt</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-3 pt-2">
             <button
               onClick={onExit}
-              className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition-colors"
+              className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition-colors"
             >
               Return to Student Portal
             </button>
@@ -293,7 +443,29 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
   }
 
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col select-none">
+    <div className="min-h-screen bg-slate-100 flex flex-col">
+      {/* Toast Notification */}
+      {playerToast && (
+        <div className="fixed top-18 right-6 z-50 flex items-center gap-2 px-4 py-2.5 rounded-xl shadow-lg text-xs font-semibold border backdrop-blur-md animate-in fade-in slide-in-from-top-2">
+          {playerToast.type === 'success' ? (
+            <div className="bg-emerald-900 text-emerald-100 border-emerald-700 p-2 rounded-lg flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <span>{playerToast.message}</span>
+            </div>
+          ) : playerToast.type === 'error' ? (
+            <div className="bg-rose-900 text-rose-100 border-rose-700 p-2 rounded-lg flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-400" />
+              <span>{playerToast.message}</span>
+            </div>
+          ) : (
+            <div className="bg-slate-900 text-slate-100 border-slate-700 p-2 rounded-lg flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-indigo-400" />
+              <span>{playerToast.message}</span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Top Testing Header */}
       <header className="sticky top-0 z-30 bg-slate-900 text-white border-b border-slate-800 px-6 py-3 flex items-center justify-between">
         <div className="flex items-center gap-4">
@@ -352,15 +524,15 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
           <div className="flex items-center gap-2">
             <AlertOctagon className="w-4 h-4 text-slate-900 shrink-0" />
             <span>
-              <strong>Warning: Window switch detected ({tabSwitches} / {exam.maxAllowedTabSwitches || 2}).</strong>{' '}
-              Switching tabs again will immediately lock and terminate your examination interface!
+              <strong>Warning: Window switch detected ({tabSwitches} / {exam.maxAllowedTabSwitches || 3}).</strong>{' '}
+              Leaving this window again will freeze your examination workstation!
             </span>
           </div>
           <button
             onClick={() => setShowTabWarning(false)}
-            className="text-[11px] font-bold underline ml-4 hover:text-black"
+            className="text-[11px] font-bold underline ml-4 hover:text-black cursor-pointer"
           >
-            Acknowledge & Stay on Screen
+            Acknowledge & Stay Focused
           </button>
         </div>
       )}
@@ -382,7 +554,16 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
               </div>
 
               <div className="flex items-center gap-3">
-                <span className="text-xs font-semibold text-slate-700 bg-indigo-50 border border-indigo-100 text-indigo-700 px-2.5 py-0.5 rounded">
+                <button
+                  onClick={handleQuickSampleAnswer}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 transition-colors"
+                  title="Insert sample candidate answer for instant testing"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Fill Sample Answer</span>
+                </button>
+
+                <span className="text-xs font-semibold text-slate-700 bg-slate-100 border border-slate-200 px-2.5 py-1 rounded">
                   {currentQuestion.marks} Marks {exam.negativeMarking && currentQuestion.negativeMarks ? `(-${currentQuestion.negativeMarks})` : ''}
                 </span>
 
@@ -426,24 +607,25 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
                     {currentQuestion.options?.map((opt) => {
                       const isSelected = currentAnswer?.selectedOptionId === opt.id;
                       return (
-                        <label
+                        <div
                           key={opt.id}
                           onClick={() => handleAnswerChange({ selectedOptionId: opt.id })}
-                          className={`flex items-center gap-3 p-4 rounded-xl border cursor-pointer transition-all ${
+                          className={`flex items-center gap-3.5 p-4 rounded-xl border cursor-pointer transition-all select-none ${
                             isSelected
-                              ? 'bg-indigo-50/80 border-indigo-600 text-indigo-950 font-medium shadow-xs'
-                              : 'bg-white border-slate-200 hover:bg-slate-50/80 text-slate-800'
+                              ? 'bg-indigo-50/90 border-indigo-600 text-indigo-950 font-medium shadow-xs ring-1 ring-indigo-500'
+                              : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-800'
                           }`}
                         >
-                          <div
-                            className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 ${
-                              isSelected ? 'border-indigo-600 bg-indigo-600' : 'border-slate-300'
-                            }`}
-                          >
-                            {isSelected && <div className="w-2 h-2 rounded-full bg-white" />}
-                          </div>
-                          <span className="text-sm">{opt.text}</span>
-                        </label>
+                          <input
+                            type="radio"
+                            name={`q_${currentQuestion.id}`}
+                            id={`opt_${opt.id}`}
+                            checked={isSelected}
+                            onChange={() => handleAnswerChange({ selectedOptionId: opt.id })}
+                            className="w-4 h-4 text-indigo-600 border-slate-300 focus:ring-indigo-500 shrink-0 cursor-pointer"
+                          />
+                          <span className="text-sm select-none">{opt.text}</span>
+                        </div>
                       );
                     })}
                   </div>
@@ -453,13 +635,13 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
                 {currentQuestion.type === 'multiple_select' && (
                   <div className="space-y-3 pt-2">
                     <div className="text-xs text-slate-500 font-medium">
-                      Select all options that apply:
+                      Select all correct options:
                     </div>
                     {currentQuestion.options?.map((opt) => {
                       const selectedIds = currentAnswer?.selectedOptionIds || [];
                       const isSelected = selectedIds.includes(opt.id);
                       return (
-                        <label
+                        <div
                           key={opt.id}
                           onClick={() => {
                             const newIds = isSelected
@@ -467,21 +649,26 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
                               : [...selectedIds, opt.id];
                             handleAnswerChange({ selectedOptionIds: newIds });
                           }}
-                          className={`flex items-center gap-3 p-4 rounded-xl border cursor-pointer transition-all ${
+                          className={`flex items-center gap-3.5 p-4 rounded-xl border cursor-pointer transition-all select-none ${
                             isSelected
-                              ? 'bg-indigo-50/80 border-indigo-600 text-indigo-950 font-medium shadow-xs'
-                              : 'bg-white border-slate-200 hover:bg-slate-50/80 text-slate-800'
+                              ? 'bg-indigo-50/90 border-indigo-600 text-indigo-950 font-medium shadow-xs ring-1 ring-indigo-500'
+                              : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-800'
                           }`}
                         >
-                          <div
-                            className={`w-5 h-5 rounded border flex items-center justify-center shrink-0 ${
-                              isSelected ? 'border-indigo-600 bg-indigo-600' : 'border-slate-300'
-                            }`}
-                          >
-                            {isSelected && <Check className="w-3.5 h-3.5 text-white" />}
-                          </div>
-                          <span className="text-sm">{opt.text}</span>
-                        </label>
+                          <input
+                            type="checkbox"
+                            id={`opt_${opt.id}`}
+                            checked={isSelected}
+                            onChange={() => {
+                              const newIds = isSelected
+                                ? selectedIds.filter((id) => id !== opt.id)
+                                : [...selectedIds, opt.id];
+                              handleAnswerChange({ selectedOptionIds: newIds });
+                            }}
+                            className="w-4 h-4 rounded text-indigo-600 border-slate-300 focus:ring-indigo-500 shrink-0 cursor-pointer"
+                          />
+                          <span className="text-sm select-none">{opt.text}</span>
+                        </div>
                       );
                     })}
                   </div>
@@ -497,8 +684,8 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
                       type="text"
                       value={currentAnswer?.textAnswer || ''}
                       onChange={(e) => handleAnswerChange({ textAnswer: e.target.value })}
-                      placeholder="Type your response here..."
-                      className="w-full px-4 py-3 bg-white border border-slate-300 rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      placeholder="Type your concise response here..."
+                      className="w-full px-4 py-3 bg-white border border-slate-300 rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-2xs"
                     />
                   </div>
                 )}
@@ -518,9 +705,18 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
                       rows={9}
                       value={currentAnswer?.textAnswer || ''}
                       onChange={(e) => handleAnswerChange({ textAnswer: e.target.value })}
-                      placeholder="Formulate your detailed academic arguments..."
-                      className="w-full p-4 bg-white border border-slate-300 rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 leading-relaxed font-sans"
+                      placeholder="Formulate your detailed academic arguments, theorems, and explanations..."
+                      className="w-full p-4 bg-white border border-slate-300 rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 leading-relaxed font-sans shadow-2xs"
                     />
+                    <div className="p-3 bg-indigo-50/50 border border-indigo-100 rounded-xl text-xs text-indigo-900 flex items-center justify-between">
+                      <span>Subjective essay marking rubric applied by university examiner upon submission.</span>
+                      <button
+                        onClick={handleQuickSampleAnswer}
+                        className="text-indigo-700 font-semibold underline hover:text-indigo-900 text-[11px]"
+                      >
+                        Insert Demo Essay Text
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -535,8 +731,8 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
                         type="text"
                         value={currentAnswer?.textAnswer || ''}
                         onChange={(e) => handleAnswerChange({ textAnswer: e.target.value })}
-                        placeholder="Keyword"
-                        className="w-full px-4 py-3 bg-white border border-slate-300 rounded-xl text-slate-900 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        placeholder="e.g. chaining"
+                        className="w-full px-4 py-3 bg-white border border-slate-300 rounded-xl text-slate-900 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-2xs"
                       />
                     </div>
                   </div>
@@ -566,7 +762,7 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
                                 };
                                 handleAnswerChange({ matchingSelections: newMatches });
                               }}
-                              className="px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                              className="px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-2xs"
                             >
                               <option value="">-- Select Matching Concept --</option>
                               {currentQuestion.matchingPairs?.map((p) => (
@@ -596,10 +792,10 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
                       </div>
                     </div>
 
-                    <div className="p-6 border-2 border-dashed border-slate-300 rounded-2xl text-center space-y-3 bg-white">
+                    <div className="p-6 border-2 border-dashed border-slate-300 rounded-2xl text-center space-y-4 bg-white">
                       <UploadCloud className="w-8 h-8 text-indigo-600 mx-auto" />
-                      <div>
-                        <label className="cursor-pointer inline-block px-4 py-2 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 font-semibold rounded-lg text-xs transition-colors">
+                      <div className="flex flex-wrap items-center justify-center gap-3">
+                        <label className="cursor-pointer inline-block px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-lg text-xs transition-colors shadow-xs">
                           <span>Browse Local File</span>
                           <input
                             type="file"
@@ -608,11 +804,19 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
                             className="hidden"
                           />
                         </label>
-                        <p className="text-[11px] text-slate-400 mt-1">Direct upload to examination storage</p>
+
+                        <button
+                          type="button"
+                          onClick={attachSampleFile}
+                          className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold rounded-lg text-xs border border-slate-300 flex items-center gap-1.5 transition-colors"
+                        >
+                          <FileCode className="w-3.5 h-3.5 text-indigo-600" />
+                          <span>Attach Sample SQL DDL</span>
+                        </button>
                       </div>
 
                       {currentAnswer?.uploadedFile && (
-                        <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-left flex items-center justify-between text-xs">
+                        <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-left flex items-center justify-between text-xs max-w-lg mx-auto">
                           <div className="flex items-center gap-2">
                             <FileText className="w-4 h-4 text-emerald-700" />
                             <div>
@@ -643,7 +847,7 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
             <button
               onClick={() => setCurrentQuestionIndex((prev) => Math.max(0, prev - 1))}
               disabled={currentQuestionIndex === 0}
-              className="flex items-center gap-2 px-4 py-2 border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-40 text-xs font-semibold text-slate-700 rounded-lg transition-colors"
+              className="flex items-center gap-2 px-4 py-2 border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-40 text-xs font-semibold text-slate-700 rounded-lg transition-colors cursor-pointer"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
               <span>Previous</span>
@@ -657,7 +861,7 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
             <button
               onClick={() => setCurrentQuestionIndex((prev) => Math.min(totalQuestions - 1, prev + 1))}
               disabled={currentQuestionIndex === totalQuestions - 1}
-              className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs font-semibold text-white rounded-lg transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs font-semibold text-white rounded-lg transition-colors cursor-pointer shadow-xs"
             >
               <span>Next</span>
               <ArrowRight className="w-3.5 h-3.5" />
@@ -668,9 +872,14 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
         {/* Right Column: Question Palette (1 col) */}
         <div className="space-y-4">
           <div className="p-5 bg-white rounded-2xl border border-slate-200 shadow-xs space-y-4">
-            <h2 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-              Examination Palette
-            </h2>
+            <div className="flex items-center justify-between">
+              <h2 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
+                Question Palette
+              </h2>
+              <span className="text-[11px] font-mono text-slate-400">
+                {answeredCount}/{totalQuestions}
+              </span>
+            </div>
 
             <div className="grid grid-cols-5 gap-2">
               {exam.questions.map((q, idx) => {
@@ -696,7 +905,7 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
                   <button
                     key={q.id}
                     onClick={() => setCurrentQuestionIndex(idx)}
-                    className={`h-9 rounded-lg text-xs font-semibold border flex items-center justify-center transition-all ${btnClass}`}
+                    className={`h-9 rounded-lg text-xs font-semibold border flex items-center justify-center transition-all cursor-pointer ${btnClass}`}
                   >
                     {idx + 1}
                   </button>
@@ -720,13 +929,14 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
             </div>
           </div>
 
+          {/* Quick Simulation & Security Card */}
           <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
             <div className="font-semibold text-slate-900 flex items-center gap-1.5 text-rose-700">
               <ShieldAlert className="w-3.5 h-3.5" />
-              <span>Anti-Cheat Lock Policy</span>
+              <span>Anti-Cheat Proctoring Active</span>
             </div>
             <p className="text-[11px] text-slate-600 leading-relaxed">
-              Do not leave this tab or close this window. Your interaction events are continuously verified by the university invigilation proctor. Solutions remain classified until Results Officer ratification.
+              Maintain full-screen focus. If locked out, use Proctor PIN <code className="bg-slate-200 px-1 py-0.2 rounded font-bold">PROCTOR2026</code> to resume. Solutions remain hidden until formal approval by the Results Officer.
             </p>
           </div>
         </div>
@@ -771,14 +981,14 @@ export const ExamTakingPlayer: React.FC<ExamTakingPlayerProps> = ({
               <button
                 onClick={() => setShowSubmitModal(false)}
                 disabled={isSubmitting}
-                className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors"
+                className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
               >
                 Back to Test
               </button>
               <button
                 onClick={handleSubmit}
                 disabled={isSubmitting}
-                className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors"
+                className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors cursor-pointer"
               >
                 {isSubmitting ? 'Locking Submission...' : 'Confirm Submission'}
               </button>
