@@ -1,0 +1,6 @@
+{
+  "name": "ExamPro — Online Examination Management System",
+  "description": "Enterprise multi-school online examination platform featuring role-based portals, question bank management, secure timed testing, automated and subjective marking, invigilation monitoring, and academic analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
